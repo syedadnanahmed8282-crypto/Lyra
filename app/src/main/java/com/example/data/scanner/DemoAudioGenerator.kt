@@ -16,7 +16,7 @@ object DemoAudioGenerator {
      * Generates PCM WAV files with harmonic synth chords and melodies.
      */
     fun getDemoSongs(context: Context): List<Song> {
-        val cacheDir = File(context.cacheDir, "demo_tracks")
+        val cacheDir = File(context.cacheDir, "demo_tracks_v2")
         if (!cacheDir.exists()) {
             cacheDir.mkdirs()
         }
@@ -69,7 +69,7 @@ object DemoAudioGenerator {
     ): Song {
         if (!file.exists() || file.length() < 1000) {
             try {
-                val sampleRate = 22050
+                val sampleRate = 44100
                 val totalSamples = sampleRate * durationSeconds
                 val pcmData = ShortArray(totalSamples)
 

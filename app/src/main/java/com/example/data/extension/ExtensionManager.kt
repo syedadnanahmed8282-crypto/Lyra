@@ -7,13 +7,23 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.util.UUID
 import java.util.concurrent.TimeUnit
+import java.util.zip.ZipInputStream
+
+interface JsHttpBridge {
+    fun httpGet(url: String, headersJson: String?): String
+    fun httpPost(url: String, body: String, headersJson: String?): String
+}
 
 data class ExtensionPlugin(
     val id: String,
@@ -44,9 +54,12 @@ class ExtensionManager(private val context: Context) {
     private val okHttpClient = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(15, TimeUnit.SECONDS)
+        .followRedirects(true)
+        .followSslRedirects(true)
         .build()
 
-    private val extensionsDir = File(context.filesDir, "plugins")
+    private val extensionsDir = File(context.filesDir, "extensions")
+    private val legacyPluginsDir = File(context.filesDir, "plugins")
 
     private val _installedPlugins = MutableStateFlow<List<ExtensionPlugin>>(emptyList())
     val installedPlugins: StateFlow<List<ExtensionPlugin>> = _installedPlugins.asStateFlow()
@@ -67,9 +80,15 @@ class ExtensionManager(private val context: Context) {
     private fun loadInstalledPlugins() {
         val pluginsList = mutableListOf<ExtensionPlugin>()
 
-        val pluginFiles = extensionsDir.listFiles { _, name -> name.endsWith(".js") || name.endsWith(".eapk") || name.endsWith(".json") }
+        val files = mutableListOf<File>()
+        if (extensionsDir.exists()) {
+            extensionsDir.listFiles { _, name -> name.endsWith(".js") || name.endsWith(".eapk") || name.endsWith(".json") }?.let { files.addAll(it) }
+        }
+        if (legacyPluginsDir.exists()) {
+            legacyPluginsDir.listFiles { _, name -> name.endsWith(".js") || name.endsWith(".eapk") || name.endsWith(".json") }?.let { files.addAll(it) }
+        }
 
-        if (pluginFiles.isNullOrEmpty()) {
+        if (files.isEmpty()) {
             val defaultPlugin1 = createDefaultNcsPlugin()
             val defaultPlugin2 = createDefaultRadioPlugin()
             savePluginToFile(defaultPlugin1)
@@ -77,10 +96,10 @@ class ExtensionManager(private val context: Context) {
             pluginsList.add(defaultPlugin1)
             pluginsList.add(defaultPlugin2)
         } else {
-            for (file in pluginFiles) {
+            for (file in files) {
                 try {
-                    val content = file.readText()
-                    val plugin = parsePluginFromContent(file.nameWithoutExtension, content)
+                    val bytes = file.readBytes()
+                    val plugin = parsePluginFromBytes(file.nameWithoutExtension, bytes, file.nameWithoutExtension)
                     if (plugin != null) {
                         pluginsList.add(plugin)
                     }
@@ -90,11 +109,11 @@ class ExtensionManager(private val context: Context) {
             }
         }
 
-        _installedPlugins.value = pluginsList
+        _installedPlugins.value = pluginsList.distinctBy { it.id }
     }
 
     private fun savePluginToFile(plugin: ExtensionPlugin) {
-        val file = File(extensionsDir, "${plugin.id}.js")
+        val file = File(extensionsDir, "${plugin.id}.json")
         val json = JSONObject().apply {
             put("id", plugin.id)
             put("name", plugin.name)
@@ -109,13 +128,77 @@ class ExtensionManager(private val context: Context) {
         file.writeText(json.toString())
     }
 
-    fun parsePluginFromContent(id: String, content: String): ExtensionPlugin? {
+    fun parsePluginFromBytes(id: String, bytes: ByteArray, defaultName: String): ExtensionPlugin? {
+        if (bytes.size >= 4 && bytes[0] == 'P'.toByte() && bytes[1] == 'K'.toByte() && bytes[2] == 3.toByte() && bytes[3] == 4.toByte()) {
+            try {
+                var manifestContent: String? = null
+                val scripts = mutableMapOf<String, String>()
+
+                ZipInputStream(ByteArrayInputStream(bytes)).use { zis ->
+                    var entry = zis.nextEntry
+                    while (entry != null) {
+                        if (!entry.isDirectory) {
+                            val entryName = entry.name.lowercase()
+                            val out = ByteArrayOutputStream()
+                            zis.copyTo(out)
+                            val text = out.toString("UTF-8")
+                            if (entryName.endsWith("manifest.json") || entryName == "manifest.json") {
+                                manifestContent = text
+                            } else if (entryName.endsWith(".js")) {
+                                scripts[entry.name] = text
+                            }
+                        }
+                        entry = zis.nextEntry
+                    }
+                }
+
+                var pluginName = defaultName
+                var version = "1.0.0"
+                var author = "Community"
+                var description = "EAPK Extension Package"
+                var mainFile = "index.js"
+
+                if (manifestContent != null) {
+                    val json = JSONObject(manifestContent)
+                    pluginName = json.optString("name", defaultName)
+                    version = json.optString("version", "1.0.0")
+                    author = json.optString("author", "Community")
+                    description = json.optString("description", description)
+                    mainFile = json.optString("main", "index.js")
+                }
+
+                val mainScriptContent = scripts[mainFile]
+                    ?: scripts.entries.find { it.key.endsWith(mainFile) }?.value
+                    ?: scripts.values.firstOrNull()
+
+                if (!mainScriptContent.isNullOrBlank()) {
+                    return ExtensionPlugin(
+                        id = id,
+                        name = pluginName,
+                        version = version,
+                        author = author,
+                        description = description,
+                        scriptContent = mainScriptContent,
+                        isEnabled = true
+                    )
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+
+        val textContent = bytes.toString(Charsets.UTF_8)
+        return parsePluginFromContent(id, textContent, defaultName)
+    }
+
+    fun parsePluginFromContent(id: String, content: String, defaultName: String = "Custom Extension"): ExtensionPlugin? {
         return try {
-            if (content.trim().startsWith("{")) {
-                val json = JSONObject(content)
+            val trimmed = content.trim()
+            if (trimmed.startsWith("{")) {
+                val json = JSONObject(trimmed)
                 ExtensionPlugin(
                     id = json.optString("id", id),
-                    name = json.optString("name", "Unknown Extension"),
+                    name = json.optString("name", defaultName),
                     version = json.optString("version", "1.0.0"),
                     author = json.optString("author", "Community"),
                     description = json.optString("description", "Online audio plugin extension"),
@@ -125,12 +208,12 @@ class ExtensionManager(private val context: Context) {
                     sourceUrl = json.optString("sourceUrl", null)
                 )
             } else {
-                var name = "Custom Plugin ($id)"
+                var name = defaultName
                 var author = "Community"
                 var version = "1.0.0"
                 var description = "Custom JS Music Extension"
 
-                val lines = content.lines().take(15)
+                val lines = content.lines().take(20)
                 for (line in lines) {
                     if (line.contains("@name")) name = line.substringAfter("@name").trim()
                     if (line.contains("@author")) author = line.substringAfter("@author").trim()
@@ -156,16 +239,29 @@ class ExtensionManager(private val context: Context) {
 
     suspend fun installPluginFromUrl(url: String): Result<ExtensionPlugin> = withContext(Dispatchers.IO) {
         try {
-            val request = Request.Builder().url(url).build()
-            val response = okHttpClient.newCall(request).execute()
-            if (!response.isSuccessful) {
-                return@withContext Result.failure(Exception("HTTP error ${response.code}"))
+            var cleanUrl = url.trim()
+            if (!cleanUrl.startsWith("http://") && !cleanUrl.startsWith("https://")) {
+                cleanUrl = "https://$cleanUrl"
             }
 
-            val bodyString = response.body?.string() ?: throw Exception("Empty response body")
+            val request = Request.Builder()
+                .url(cleanUrl)
+                .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+                .header("Accept", "*/*")
+                .build()
+
+            val response = okHttpClient.newCall(request).execute()
+            if (!response.isSuccessful) {
+                return@withContext Result.failure(Exception("HTTP error ${response.code} (${response.message})"))
+            }
+
+            val bytes = response.body?.bytes() ?: throw Exception("Empty response body from server")
             val id = "ext_" + UUID.randomUUID().toString().take(8)
-            val plugin = parsePluginFromContent(id, bodyString) ?: throw Exception("Failed to parse extension code")
-            val pluginWithSource = plugin.copy(sourceUrl = url)
+            val defaultName = cleanUrl.substringAfterLast("/").substringBefore("?").ifEmpty { "Downloaded Plugin" }
+
+            val plugin = parsePluginFromBytes(id, bytes, defaultName)
+                ?: throw Exception("Failed to parse extension code or package")
+            val pluginWithSource = plugin.copy(sourceUrl = cleanUrl)
 
             savePluginToFile(pluginWithSource)
             loadInstalledPlugins()
@@ -178,7 +274,7 @@ class ExtensionManager(private val context: Context) {
     suspend fun installPluginFromCode(code: String, customName: String = "Imported Plugin"): Result<ExtensionPlugin> = withContext(Dispatchers.IO) {
         try {
             val id = "ext_" + UUID.randomUUID().toString().take(8)
-            val plugin = parsePluginFromContent(id, code) ?: ExtensionPlugin(
+            val plugin = parsePluginFromContent(id, code, customName) ?: ExtensionPlugin(
                 id = id,
                 name = customName,
                 version = "1.0.0",
@@ -198,18 +294,13 @@ class ExtensionManager(private val context: Context) {
         try {
             val inputStream = context.contentResolver.openInputStream(uri)
                 ?: return@withContext Result.failure(Exception("Cannot open file stream"))
-            val content = inputStream.bufferedReader().use { it.readText() }
+            val bytes = inputStream.use { it.readBytes() }
             val cleanName = fileName?.substringBeforeLast(".") ?: "Imported Extension"
 
             val id = "ext_" + UUID.randomUUID().toString().take(8)
-            val plugin = parsePluginFromContent(id, content) ?: ExtensionPlugin(
-                id = id,
-                name = cleanName,
-                version = "1.0.0",
-                author = "Local File",
-                description = "Imported from local file ($cleanName)",
-                scriptContent = content
-            )
+            val plugin = parsePluginFromBytes(id, bytes, cleanName)
+                ?: throw Exception("Failed to parse local extension package")
+
             savePluginToFile(plugin)
             loadInstalledPlugins()
             Result.success(plugin)
@@ -231,10 +322,10 @@ class ExtensionManager(private val context: Context) {
     }
 
     suspend fun deletePlugin(pluginId: String) = withContext(Dispatchers.IO) {
-        val file = File(extensionsDir, "$pluginId.js")
-        if (file.exists()) {
-            file.delete()
-        }
+        val jsonFile = File(extensionsDir, "$pluginId.json")
+        val jsFile = File(extensionsDir, "$pluginId.js")
+        if (jsonFile.exists()) jsonFile.delete()
+        if (jsFile.exists()) jsFile.delete()
         loadInstalledPlugins()
     }
 
@@ -256,6 +347,98 @@ class ExtensionManager(private val context: Context) {
         _isSearching.value = false
     }
 
+    private fun createJsBridge(): JsHttpBridge {
+        return object : JsHttpBridge {
+            override fun httpGet(url: String, headersJson: String?): String {
+                return try {
+                    val reqBuilder = Request.Builder().url(url)
+                    reqBuilder.header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+                    if (!headersJson.isNullOrEmpty() && headersJson != "{}") {
+                        val json = JSONObject(headersJson)
+                        val keys = json.keys()
+                        while (keys.hasNext()) {
+                            val key = keys.next()
+                            reqBuilder.header(key, json.getString(key))
+                        }
+                    }
+                    okHttpClient.newCall(reqBuilder.build()).execute().use { resp ->
+                        resp.body?.string() ?: ""
+                    }
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                    ""
+                }
+            }
+
+            override fun httpPost(url: String, body: String, headersJson: String?): String {
+                return try {
+                    val mediaType = "application/json; charset=utf-8".toMediaTypeOrNull()
+                    val reqBody = body.toRequestBody(mediaType)
+                    val reqBuilder = Request.Builder().url(url).post(reqBody)
+                    reqBuilder.header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+                    if (!headersJson.isNullOrEmpty() && headersJson != "{}") {
+                        val json = JSONObject(headersJson)
+                        val keys = json.keys()
+                        while (keys.hasNext()) {
+                            val key = keys.next()
+                            reqBuilder.header(key, json.getString(key))
+                        }
+                    }
+                    okHttpClient.newCall(reqBuilder.build()).execute().use { resp ->
+                        resp.body?.string() ?: ""
+                    }
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                    ""
+                }
+            }
+        }
+    }
+
+    private fun getJsPolyfill(): String {
+        return """
+            var http = {
+                get: function(url, headers) {
+                    var hStr = headers ? (typeof headers === 'string' ? headers : JSON.stringify(headers)) : "{}";
+                    var res = JsHttpBridge.httpGet(url, hStr);
+                    return {
+                        status: 200,
+                        body: res,
+                        text: function() { return res; },
+                        json: function() { try { return JSON.parse(res); } catch(e) { return {}; } }
+                    };
+                },
+                post: function(url, body, headers) {
+                    var hStr = headers ? (typeof headers === 'string' ? headers : JSON.stringify(headers)) : "{}";
+                    var bStr = typeof body === 'string' ? body : JSON.stringify(body || {});
+                    var res = JsHttpBridge.httpPost(url, bStr, hStr);
+                    return {
+                        status: 200,
+                        body: res,
+                        text: function() { return res; },
+                        json: function() { try { return JSON.parse(res); } catch(e) { return {}; } }
+                    };
+                }
+            };
+
+            function httpGet(url, headers) {
+                var hStr = headers ? (typeof headers === 'string' ? headers : JSON.stringify(headers)) : "{}";
+                return JsHttpBridge.httpGet(url, hStr);
+            }
+
+            function fetch(url, options) {
+                options = options || {};
+                var method = (options.method || 'GET').toUpperCase();
+                var headers = options.headers || {};
+                if (method === 'POST') {
+                    return http.post(url, options.body || '', headers);
+                } else {
+                    return http.get(url, headers);
+                }
+            }
+        """.trimIndent()
+    }
+
     private fun executeSearchInPlugin(plugin: ExtensionPlugin, query: String): List<OnlineSong> {
         val results = mutableListOf<OnlineSong>()
 
@@ -263,8 +446,12 @@ class ExtensionManager(private val context: Context) {
         try {
             val duktape = Duktape.create()
             try {
+                duktape.set("JsHttpBridge", JsHttpBridge::class.java, createJsBridge())
+                duktape.evaluate(getJsPolyfill())
                 duktape.evaluate(plugin.scriptContent)
-                val jsCall = "search('${query.replace("'", "\\'")}')"
+
+                val escapedQuery = query.replace("\\", "\\\\").replace("'", "\\'")
+                val jsCall = "search('$escapedQuery')"
                 val jsonResultStr = duktape.evaluate(jsCall) as? String
                 if (!jsonResultStr.isNullOrEmpty()) {
                     val jsonArray = JSONArray(jsonResultStr)
@@ -276,9 +463,9 @@ class ExtensionManager(private val context: Context) {
                                 title = item.optString("title", "Unknown Track"),
                                 artist = item.optString("artist", "Unknown Artist"),
                                 album = item.optString("album", plugin.name),
-                                streamUrl = item.optString("streamUrl", ""),
-                                artworkUrl = item.optString("artworkUrl", ""),
-                                durationMs = item.optLong("durationMs", 180000L),
+                                streamUrl = item.optString("streamUrl", item.optString("url", "")),
+                                artworkUrl = item.optString("artworkUrl", item.optString("cover", "")),
+                                durationMs = item.optLong("durationMs", item.optLong("duration", 180000L)),
                                 extensionId = plugin.id,
                                 extensionName = plugin.name
                             )
@@ -298,6 +485,33 @@ class ExtensionManager(private val context: Context) {
         }
 
         return results
+    }
+
+    suspend fun resolveStreamUrl(song: OnlineSong): String = withContext(Dispatchers.IO) {
+        if (song.streamUrl.startsWith("http://") || song.streamUrl.startsWith("https://")) {
+            return@withContext song.streamUrl
+        }
+        val plugin = _installedPlugins.value.find { it.id == song.extensionId }
+            ?: return@withContext song.streamUrl
+
+        try {
+            val duktape = Duktape.create()
+            try {
+                duktape.set("JsHttpBridge", JsHttpBridge::class.java, createJsBridge())
+                duktape.evaluate(getJsPolyfill())
+                duktape.evaluate(plugin.scriptContent)
+                val jsCall = "getStreamUrl('${song.id}')"
+                val resolved = duktape.evaluate(jsCall) as? String
+                if (!resolved.isNullOrEmpty() && (resolved.startsWith("http://") || resolved.startsWith("https://"))) {
+                    return@withContext resolved
+                }
+            } finally {
+                duktape.close()
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        return@withContext song.streamUrl
     }
 
     private fun executeFallbackSearch(plugin: ExtensionPlugin, query: String): List<OnlineSong> {
@@ -517,3 +731,4 @@ class ExtensionManager(private val context: Context) {
         )
     }
 }
+

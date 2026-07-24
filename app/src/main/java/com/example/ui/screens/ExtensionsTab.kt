@@ -627,9 +627,10 @@ private fun InstallPluginDialog(
     var urlInput by remember { mutableStateOf("") }
     var codeInput by remember { mutableStateOf("") }
     var pluginNameInput by remember { mutableStateOf("Custom Plugin") }
+    var isInstalling by remember { mutableStateOf(false) }
 
     AlertDialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest = { if (!isInstalling) onDismiss() },
         title = {
             Text("Install Music Extension", fontWeight = FontWeight.Bold)
         },
@@ -638,6 +639,7 @@ private fun InstallPluginDialog(
                 Row(modifier = Modifier.fillMaxWidth()) {
                     OutlinedButton(
                         onClick = onPickLocalFile,
+                        enabled = !isInstalling,
                         colors = ButtonDefaults.outlinedButtonColors(containerColor = themeColor.copy(alpha = 0.1f)),
                         modifier = Modifier.weight(1f)
                     ) {
@@ -650,6 +652,7 @@ private fun InstallPluginDialog(
 
                     OutlinedButton(
                         onClick = { mode = 1 },
+                        enabled = !isInstalling,
                         colors = ButtonDefaults.outlinedButtonColors(
                             containerColor = if (mode == 1) themeColor.copy(alpha = 0.15f) else Color.Transparent
                         ),
@@ -664,6 +667,7 @@ private fun InstallPluginDialog(
 
                     OutlinedButton(
                         onClick = { mode = 2 },
+                        enabled = !isInstalling,
                         colors = ButtonDefaults.outlinedButtonColors(
                             containerColor = if (mode == 2) themeColor.copy(alpha = 0.15f) else Color.Transparent
                         ),
@@ -677,12 +681,24 @@ private fun InstallPluginDialog(
 
                 Spacer(modifier = Modifier.height(12.dp))
 
-                if (mode == 1) {
+                if (isInstalling) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 16.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center
+                    ) {
+                        CircularProgressIndicator(color = themeColor, modifier = Modifier.size(24.dp))
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Text("Downloading & installing extension...", fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                    }
+                } else if (mode == 1) {
                     OutlinedTextField(
                         value = urlInput,
                         onValueChange = { urlInput = it },
-                        label = { Text("Plugin Script URL (.js / .eapk)") },
-                        placeholder = { Text("https://example.com/extension.js") },
+                        label = { Text("Plugin Script / Shortcode URL (.js / .eapk)") },
+                        placeholder = { Text("https://example.com/extension.eapk") },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
                     )
@@ -710,7 +726,7 @@ private fun InstallPluginDialog(
                             .fillMaxWidth()
                             .height(100.dp)
                             .background(themeColor.copy(alpha = 0.08f), RoundedCornerShape(12.dp))
-                            .clickable { onPickLocalFile() },
+                            .clickable(enabled = !isInstalling) { onPickLocalFile() },
                         contentAlignment = Alignment.Center
                     ) {
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -726,6 +742,7 @@ private fun InstallPluginDialog(
             if (mode == 0) {
                 Button(
                     onClick = onPickLocalFile,
+                    enabled = !isInstalling,
                     colors = ButtonDefaults.buttonColors(containerColor = themeColor)
                 ) {
                     Text("Select File")
@@ -734,19 +751,26 @@ private fun InstallPluginDialog(
                 Button(
                     onClick = {
                         if (mode == 1) {
-                            if (urlInput.isNotBlank()) onInstallUrl(urlInput.trim())
+                            if (urlInput.isNotBlank()) {
+                                isInstalling = true
+                                onInstallUrl(urlInput.trim())
+                            }
                         } else {
-                            if (codeInput.isNotBlank()) onInstallCode(codeInput.trim(), pluginNameInput.trim())
+                            if (codeInput.isNotBlank()) {
+                                isInstalling = true
+                                onInstallCode(codeInput.trim(), pluginNameInput.trim())
+                            }
                         }
                     },
+                    enabled = !isInstalling && ((mode == 1 && urlInput.isNotBlank()) || (mode == 2 && codeInput.isNotBlank())),
                     colors = ButtonDefaults.buttonColors(containerColor = themeColor)
                 ) {
-                    Text("Install")
+                    Text(if (isInstalling) "Installing..." else "Install")
                 }
             }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) {
+            TextButton(onClick = onDismiss, enabled = !isInstalling) {
                 Text("Cancel")
             }
         }

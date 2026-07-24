@@ -174,7 +174,14 @@ class MusicService : Service(), MediaPlayer.OnPreparedListener, MediaPlayer.OnCo
         _duration.value = song.duration
 
         try {
-            mediaPlayer?.release()
+            stopPositionUpdates()
+            mediaPlayer?.run {
+                try {
+                    if (isPlaying) stop()
+                } catch (e: Exception) {}
+                reset()
+                release()
+            }
             mediaPlayer = MediaPlayer().apply {
                 setWakeMode(applicationContext, PowerManager.PARTIAL_WAKE_LOCK)
                 setAudioAttributes(
@@ -184,6 +191,7 @@ class MusicService : Service(), MediaPlayer.OnPreparedListener, MediaPlayer.OnCo
                         .build()
                 )
                 val uriString = song.contentUri.toString()
+                val songPath = song.path
                 if (uriString.startsWith("http://") || uriString.startsWith("https://")) {
                     val headers = HashMap<String, String>()
                     headers["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -191,7 +199,46 @@ class MusicService : Service(), MediaPlayer.OnPreparedListener, MediaPlayer.OnCo
                     headers["Connection"] = "keep-alive"
                     setDataSource(applicationContext, song.contentUri, headers)
                 } else {
-                    setDataSource(applicationContext, song.contentUri)
+                    var isSet = false
+                    // 1. Try FileInputStream for direct file paths (demo tracks & offline files)
+                    if (songPath.isNotEmpty()) {
+                        val file = java.io.File(songPath)
+                        if (file.exists() && file.canRead()) {
+                            try {
+                                java.io.FileInputStream(file).use { fis ->
+                                    setDataSource(fis.fd)
+                                    isSet = true
+                                }
+                            } catch (e: Exception) {
+                                e.printStackTrace()
+                            }
+                        }
+                    }
+
+                    // 2. Try ContentResolver ParcelFileDescriptor for MediaStore URIs
+                    if (!isSet) {
+                        try {
+                            applicationContext.contentResolver.openFileDescriptor(song.contentUri, "r")?.use { pfd ->
+                                setDataSource(pfd.fileDescriptor)
+                                isSet = true
+                            }
+                        } catch (e: Exception) {
+                            e.printStackTrace()
+                        }
+                    }
+
+                    // 3. Fallback to Uri or String path
+                    if (!isSet) {
+                        try {
+                            setDataSource(applicationContext, song.contentUri)
+                        } catch (e: Exception) {
+                            if (songPath.isNotEmpty()) {
+                                setDataSource(songPath)
+                            } else {
+                                throw e
+                            }
+                        }
+                    }
                 }
                 setOnPreparedListener(this@MusicService)
                 setOnCompletionListener(this@MusicService)
@@ -205,15 +252,23 @@ class MusicService : Service(), MediaPlayer.OnPreparedListener, MediaPlayer.OnCo
     }
 
     override fun onPrepared(mp: MediaPlayer?) {
-        initEqualizer(mp?.audioSessionId ?: 0)
-        _duration.value = mp?.duration?.toLong() ?: _currentSong.value?.duration ?: 0L
+        if (mp == null) return
+        initEqualizer(mp.audioSessionId)
+        val prepDuration = mp.duration.toLong()
+        if (prepDuration > 0) {
+            _duration.value = prepDuration
+        }
 
-        if (requestAudioFocus()) {
-            mp?.start()
+        requestAudioFocus()
+        try {
+            mp.start()
             _isPlaying.value = true
             startPositionUpdates()
             updateMediaSessionState(PlaybackState.STATE_PLAYING)
             updateNotification()
+        } catch (e: Exception) {
+            e.printStackTrace()
+            _isPlaying.value = false
         }
     }
 
@@ -342,40 +397,60 @@ class MusicService : Service(), MediaPlayer.OnPreparedListener, MediaPlayer.OnCo
     // Audio Focus Handling
     private fun requestAudioFocus(): Boolean {
         val am = audioManager ?: return true
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val attr = AudioAttributes.Builder()
-                .setUsage(AudioAttributes.USAGE_MEDIA)
-                .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-                .build()
-            audioFocusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
-                .setAudioAttributes(attr)
-                .setAcceptsDelayedFocusGain(true)
-                .setOnAudioFocusChangeListener { focusChange ->
+        return try {
+            val res = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                if (audioFocusRequest == null) {
+                    val attr = AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_MEDIA)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                        .build()
+                    audioFocusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+                        .setAudioAttributes(attr)
+                        .setAcceptsDelayedFocusGain(true)
+                        .setOnAudioFocusChangeListener { focusChange ->
+                            handleAudioFocusChange(focusChange)
+                        }.build()
+                }
+                am.requestAudioFocus(audioFocusRequest!!)
+            } else {
+                @Suppress("DEPRECATION")
+                am.requestAudioFocus({ focusChange ->
                     handleAudioFocusChange(focusChange)
-                }.build()
-            am.requestAudioFocus(audioFocusRequest!!) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
-        } else {
-            @Suppress("DEPRECATION")
-            am.requestAudioFocus({ focusChange ->
-                handleAudioFocusChange(focusChange)
-            }, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+                }, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN)
+            }
+            res == AudioManager.AUDIOFOCUS_REQUEST_GRANTED || res == AudioManager.AUDIOFOCUS_REQUEST_DELAYED
+        } catch (e: Exception) {
+            e.printStackTrace()
+            true
         }
     }
 
     private fun handleAudioFocusChange(focusChange: Int) {
         when (focusChange) {
-            AudioManager.AUDIOFOCUS_LOSS -> {
-                if (_isPlaying.value) togglePlayPause()
-            }
-            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
-                if (_isPlaying.value) togglePlayPause()
+            AudioManager.AUDIOFOCUS_LOSS, AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
+                pausePlayback()
             }
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
-                mediaPlayer?.setVolume(0.2f, 0.2f)
+                try { mediaPlayer?.setVolume(0.2f, 0.2f) } catch (e: Exception) {}
             }
             AudioManager.AUDIOFOCUS_GAIN -> {
-                mediaPlayer?.setVolume(1.0f, 1.0f)
-                if (!_isPlaying.value) togglePlayPause()
+                try { mediaPlayer?.setVolume(1.0f, 1.0f) } catch (e: Exception) {}
+            }
+        }
+    }
+
+    private fun pausePlayback() {
+        mediaPlayer?.let { player ->
+            try {
+                if (player.isPlaying) {
+                    player.pause()
+                    _isPlaying.value = false
+                    stopPositionUpdates()
+                    updateMediaSessionState(PlaybackState.STATE_PAUSED)
+                    updateNotification()
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
             }
         }
     }
@@ -544,7 +619,15 @@ class MusicService : Service(), MediaPlayer.OnPreparedListener, MediaPlayer.OnCo
             )
             .build()
 
-        startForeground(NOTIFICATION_ID, notification)
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                startForeground(NOTIFICATION_ID, notification, android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK)
+            } else {
+                startForeground(NOTIFICATION_ID, notification)
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
     }
 
     private fun getAlbumArtBitmap(song: Song): Bitmap {

@@ -114,10 +114,15 @@ class MusicRepository(
     }
 
     /**
-     * Scan local audio files.
+     * Scan local audio files. Falls back to generated demo songs if local storage has no music files.
      */
     suspend fun refreshLocalAudio() {
-        _rawSongs.value = scanner.scanLocalAudioFiles()
+        val scanned = scanner.scanLocalAudioFiles()
+        if (scanned.isNotEmpty()) {
+            _rawSongs.value = scanned
+        } else {
+            _rawSongs.value = com.example.data.scanner.DemoAudioGenerator.getDemoSongs(context)
+        }
     }
 
     fun setSearchQuery(query: String) {

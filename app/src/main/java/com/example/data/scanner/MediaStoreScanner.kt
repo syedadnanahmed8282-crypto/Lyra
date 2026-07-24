@@ -40,8 +40,8 @@ class MediaStoreScanner(private val context: Context) {
             MediaStore.Audio.Media.TRACK
         )
 
-        val selection = "${MediaStore.Audio.Media.IS_MUSIC} != 0 AND ${MediaStore.Audio.Media.DURATION} >= ?"
-        val selectionArgs = arrayOf(minDurationMs.toString())
+        val selection = "${MediaStore.Audio.Media.SIZE} > 0"
+        val selectionArgs = null
         val sortOrder = "${MediaStore.Audio.Media.TITLE} ASC"
 
         try {
@@ -82,7 +82,7 @@ class MediaStoreScanner(private val context: Context) {
                     // Verify file extensions: mp3, wav, flac, m4a, aac
                     val extension = filePath.substringAfterLast('.', "").lowercase()
                     if (extension in listOf("mp3", "wav", "flac", "m4a", "aac", "ogg")) {
-                        val contentUri = ContentUris.withAppendedId(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, id)
+                        val contentUri = ContentUris.withAppendedId(collection, id)
                         val albumArtUri = if (albumId > 0) ContentUris.withAppendedId(albumArtBaseUri, albumId) else null
 
                         val file = File(filePath)
