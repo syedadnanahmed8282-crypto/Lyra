@@ -1,0 +1,6 @@
+{
+  "name": "Lyra",
+  "description": "Clean, modern, and high-performance offline music player for local audio tracks with equalizer, playlists, sleep timer, and background playback.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
