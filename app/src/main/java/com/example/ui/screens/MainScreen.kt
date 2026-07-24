@@ -64,6 +64,11 @@ import com.example.ui.theme.VibrantPurple
 import com.example.viewmodel.MainViewModel
 import com.example.viewmodel.PlayerViewModel
 
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
+
 @Composable
 fun MainScreen(
     mainViewModel: MainViewModel,
@@ -79,9 +84,11 @@ fun MainScreen(
     val searchQuery by mainViewModel.searchQuery.collectAsState()
     val sortOrder by mainViewModel.sortOrder.collectAsState()
     val themeColor by mainViewModel.themeColor.collectAsState()
+    val selectedExtensionMode by mainViewModel.selectedExtensionMode.collectAsState()
 
     val currentSong by playerViewModel.currentSong.collectAsState()
     val isPlaying by playerViewModel.isPlaying.collectAsState()
+    val isLoading by playerViewModel.isLoading.collectAsState()
     val currentPositionMs by playerViewModel.currentPosition.collectAsState()
     val durationMs by playerViewModel.duration.collectAsState()
     val repeatMode by playerViewModel.repeatMode.collectAsState()
@@ -178,7 +185,51 @@ fun MainScreen(
                     .testTag("search_bar")
             )
 
-            Spacer(modifier = Modifier.height(12.dp))
+            // Extension Mode Selection Chip Bar
+            LazyRow(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                item {
+                    FilterChip(
+                        selected = selectedExtensionMode == "ALL",
+                        onClick = { mainViewModel.setSelectedExtensionMode("ALL") },
+                        label = { Text("🌐 All Sources", fontSize = 12.sp, fontWeight = FontWeight.SemiBold) },
+                        colors = FilterChipDefaults.filterChipColors(
+                            selectedContainerColor = themeColor,
+                            selectedLabelColor = PureWhite
+                        )
+                    )
+                }
+                item {
+                    FilterChip(
+                        selected = selectedExtensionMode == "LOCAL",
+                        onClick = { mainViewModel.setSelectedExtensionMode("LOCAL") },
+                        label = { Text("📱 Local Only", fontSize = 12.sp, fontWeight = FontWeight.SemiBold) },
+                        colors = FilterChipDefaults.filterChipColors(
+                            selectedContainerColor = themeColor,
+                            selectedLabelColor = PureWhite
+                        )
+                    )
+                }
+                plugins.filter { it.isEnabled }.forEach { plugin ->
+                    item {
+                        FilterChip(
+                            selected = selectedExtensionMode == plugin.id,
+                            onClick = { mainViewModel.setSelectedExtensionMode(plugin.id) },
+                            label = { Text("✨ ${plugin.name}", fontSize = 12.sp, fontWeight = FontWeight.SemiBold) },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = themeColor,
+                                selectedLabelColor = PureWhite
+                            )
+                        )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(4.dp))
 
             // Scrollable Category Tabs Row
             ScrollableTabRow(
@@ -226,6 +277,7 @@ fun MainScreen(
                         songs = songs,
                         currentPlayingSong = currentSong,
                         isPlaying = isPlaying,
+                        isLoading = isLoading,
                         themeColor = themeColor,
                         onSongClick = { list, index -> playerViewModel.playSongList(list, index) },
                         onPlayPauseToggle = { playerViewModel.togglePlayPause() },
@@ -290,6 +342,7 @@ fun MainScreen(
             MiniPlayerBar(
                 song = currentSong,
                 isPlaying = isPlaying,
+                isLoading = isLoading,
                 currentPositionMs = currentPositionMs,
                 durationMs = durationMs,
                 themeColor = themeColor,
@@ -311,6 +364,7 @@ fun MainScreen(
             NowPlayingSheet(
                 song = currentSong,
                 isPlaying = isPlaying,
+                isLoading = isLoading,
                 currentPositionMs = currentPositionMs,
                 durationMs = durationMs,
                 repeatMode = repeatMode,

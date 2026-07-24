@@ -37,6 +37,7 @@ fun SongsTab(
     songs: List<Song>,
     currentPlayingSong: Song?,
     isPlaying: Boolean = true,
+    isLoading: Boolean = false,
     themeColor: Color = VibrantPurple,
     onSongClick: (List<Song>, Int) -> Unit,
     onPlayPauseToggle: () -> Unit = {},
@@ -86,6 +87,7 @@ fun SongsTab(
                     song = song,
                     isPlayingCurrent = isCurrent,
                     isPlaying = isPlaying,
+                    isLoading = if (isCurrent) isLoading else false,
                     themeColor = themeColor,
                     onSongClick = { onSongClick(songs, index) },
                     onPlayPauseToggle = {

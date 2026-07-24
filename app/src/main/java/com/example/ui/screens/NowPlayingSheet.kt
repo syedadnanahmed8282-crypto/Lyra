@@ -96,11 +96,14 @@ import com.example.ui.theme.TextDarkPrimary
 import com.example.ui.theme.TextDarkSecondary
 import com.example.ui.theme.VibrantPurple
 
+import androidx.compose.material3.CircularProgressIndicator
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun NowPlayingSheet(
     song: Song?,
     isPlaying: Boolean,
+    isLoading: Boolean = false,
     currentPositionMs: Long,
     durationMs: Long,
     repeatMode: RepeatMode,
@@ -609,12 +612,20 @@ fun NowPlayingSheet(
                             onClick = onPlayPauseClick,
                             modifier = Modifier.fillMaxSize()
                         ) {
-                            Icon(
-                                imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
-                                contentDescription = if (isPlaying) "Pause" else "Play",
-                                tint = activeThemeColor,
-                                modifier = Modifier.size(40.dp)
-                            )
+                            if (isLoading) {
+                                CircularProgressIndicator(
+                                    color = activeThemeColor,
+                                    strokeWidth = 3.dp,
+                                    modifier = Modifier.size(36.dp)
+                                )
+                            } else {
+                                Icon(
+                                    imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                                    contentDescription = if (isPlaying) "Pause" else "Play",
+                                    tint = activeThemeColor,
+                                    modifier = Modifier.size(40.dp)
+                                )
+                            }
                         }
                     }
 

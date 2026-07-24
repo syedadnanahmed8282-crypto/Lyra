@@ -1,6 +1,8 @@
 package com.example.data.extension
 
 import android.content.Context
+import android.net.Uri
+import com.example.model.Song
 import com.squareup.duktape.Duktape
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -44,6 +46,14 @@ data class ExtensionPlugin(
     val sourceUrl: String? = null
 )
 
+data class ExtensionAccount(
+    val extensionId: String,
+    val username: String,
+    val channelOrPlaylistId: String,
+    val authToken: String = "",
+    val isLoggedIn: Boolean = true
+)
+
 data class OnlineSong(
     val id: String,
     val title: String,
@@ -55,6 +65,27 @@ data class OnlineSong(
     val extensionId: String,
     val extensionName: String
 )
+
+fun OnlineSong.toSong(): Song {
+    val streamUri = if (streamUrl.isNotBlank() && streamUrl.startsWith("http")) {
+        Uri.parse(streamUrl)
+    } else {
+        Uri.parse("yt_id:${id.removePrefix("yt_")}")
+    }
+    val artUri = if (artworkUrl.isNotBlank()) Uri.parse(artworkUrl) else null
+    val numericId = id.hashCode().toLong() and 0x7FFFFFFF
+    return Song(
+        id = if (numericId == 0L) 100001L else numericId,
+        title = title,
+        artist = artist,
+        album = if (album.isNotBlank()) album else extensionName,
+        albumId = extensionId.hashCode().toLong(),
+        duration = durationMs,
+        path = streamUrl.ifBlank { "yt_id:${id.removePrefix("yt_")}" },
+        contentUri = streamUri,
+        albumArtUri = artUri
+    )
+}
 
 class ExtensionManager(private val context: Context) {
 
@@ -871,7 +902,11 @@ class ExtensionManager(private val context: Context) {
         return list
     }
 
-    private fun fetchYouTubeAudioStreamUrl(videoId: String): String? {
+    suspend fun fetchYouTubeAudioStreamUrl(videoId: String): String? = withContext(Dispatchers.IO) {
+        fetchYouTubeAudioStreamUrlSync(videoId)
+    }
+
+    private fun fetchYouTubeAudioStreamUrlSync(videoId: String): String? {
         // Strategy 1: Piped Endpoints
         val pipedEndpoints = listOf(
             "https://pipedapi.kavin.rocks/streams/$videoId",

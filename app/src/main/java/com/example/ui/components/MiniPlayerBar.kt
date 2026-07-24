@@ -48,10 +48,13 @@ import com.example.ui.theme.TextDarkPrimary
 import com.example.ui.theme.TextDarkSecondary
 import com.example.ui.theme.VibrantPurple
 
+import androidx.compose.material3.CircularProgressIndicator
+
 @Composable
 fun MiniPlayerBar(
     song: Song?,
     isPlaying: Boolean,
+    isLoading: Boolean = false,
     currentPositionMs: Long,
     durationMs: Long,
     themeColor: Color = VibrantPurple,
@@ -161,12 +164,20 @@ fun MiniPlayerBar(
                     onClick = onPlayPauseClick,
                     modifier = Modifier.testTag("mini_play_pause")
                 ) {
-                    Icon(
-                        imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
-                        contentDescription = if (isPlaying) "Pause" else "Play",
-                        tint = themeColor,
-                        modifier = Modifier.size(28.dp)
-                    )
+                    if (isLoading) {
+                        CircularProgressIndicator(
+                            color = themeColor,
+                            strokeWidth = 2.5.dp,
+                            modifier = Modifier.size(24.dp)
+                        )
+                    } else {
+                        Icon(
+                            imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                            contentDescription = if (isPlaying) "Pause" else "Play",
+                            tint = themeColor,
+                            modifier = Modifier.size(28.dp)
+                        )
+                    }
                 }
 
                 IconButton(

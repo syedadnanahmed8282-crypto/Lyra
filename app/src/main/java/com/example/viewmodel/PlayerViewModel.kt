@@ -30,6 +30,9 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     private val _isPlaying = MutableStateFlow(false)
     val isPlaying: StateFlow<Boolean> = _isPlaying.asStateFlow()
 
+    private val _isLoading = MutableStateFlow(false)
+    val isLoading: StateFlow<Boolean> = _isLoading.asStateFlow()
+
     private val _currentPosition = MutableStateFlow(0L)
     val currentPosition: StateFlow<Long> = _currentPosition.asStateFlow()
 
@@ -89,6 +92,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         viewModelScope.launch {
             launch { service.currentSong.collect { _currentSong.value = it } }
             launch { service.isPlaying.collect { _isPlaying.value = it } }
+            launch { service.isLoading.collect { _isLoading.value = it } }
             launch { service.currentPosition.collect { _currentPosition.value = it } }
             launch { service.duration.collect { _duration.value = it } }
             launch { service.repeatMode.collect { _repeatMode.value = it } }

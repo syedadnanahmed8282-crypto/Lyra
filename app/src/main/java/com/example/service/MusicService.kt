@@ -19,10 +19,12 @@ import android.media.audiofx.Equalizer
 import android.media.audiofx.Virtualizer
 import android.media.session.MediaSession
 import android.media.session.PlaybackState
+import android.net.Uri
 import android.os.Binder
 import android.os.Build
 import android.os.CountDownTimer
 import android.os.IBinder
+import com.example.LyraApplication
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import com.example.MainActivity
@@ -72,6 +74,9 @@ class MusicService : Service(), MediaPlayer.OnPreparedListener, MediaPlayer.OnCo
 
     private val _isPlaying = MutableStateFlow(false)
     val isPlaying: StateFlow<Boolean> = _isPlaying.asStateFlow()
+
+    private val _isLoading = MutableStateFlow(false)
+    val isLoading: StateFlow<Boolean> = _isLoading.asStateFlow()
 
     private val _currentPosition = MutableStateFlow(0L)
     val currentPosition: StateFlow<Long> = _currentPosition.asStateFlow()
@@ -172,82 +177,108 @@ class MusicService : Service(), MediaPlayer.OnPreparedListener, MediaPlayer.OnCo
         _currentSong.value = song
         _currentPosition.value = 0L
         _duration.value = song.duration
+        _isLoading.value = true
 
-        try {
-            stopPositionUpdates()
-            mediaPlayer?.run {
-                try {
-                    if (isPlaying) stop()
-                } catch (e: Exception) {}
-                reset()
-                release()
-            }
-            mediaPlayer = MediaPlayer().apply {
-                setWakeMode(applicationContext, PowerManager.PARTIAL_WAKE_LOCK)
-                setAudioAttributes(
-                    AudioAttributes.Builder()
-                        .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-                        .setUsage(AudioAttributes.USAGE_MEDIA)
-                        .build()
-                )
+        serviceScope.launch(Dispatchers.IO) {
+            try {
+                stopPositionUpdates()
+                mediaPlayer?.run {
+                    try {
+                        if (isPlaying) stop()
+                    } catch (e: Exception) {}
+                    reset()
+                    release()
+                }
+
+                val extMgr = (applicationContext as? LyraApplication)?.extensionManager
                 val uriString = song.contentUri.toString()
                 val songPath = song.path
-                if (uriString.startsWith("http://") || uriString.startsWith("https://")) {
-                    val headers = HashMap<String, String>()
-                    headers["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-                    headers["Accept"] = "*/*"
-                    headers["Connection"] = "keep-alive"
-                    setDataSource(applicationContext, song.contentUri, headers)
-                } else {
-                    var isSet = false
-                    // 1. Try FileInputStream for direct file paths (demo tracks & offline files)
-                    if (songPath.isNotEmpty()) {
-                        val file = java.io.File(songPath)
-                        if (file.exists() && file.canRead()) {
+
+                var resolvedUrl = if (songPath.isNotBlank()) songPath else uriString
+
+                // Resolve stream URL if YouTube/extension
+                if (resolvedUrl.startsWith("yt_id:") || resolvedUrl.startsWith("yt_") || uriString.startsWith("yt_id:") || uriString.startsWith("yt_")) {
+                    val vId = resolvedUrl.removePrefix("yt_id:").removePrefix("yt_")
+                    val fetched: String? = extMgr?.fetchYouTubeAudioStreamUrl(vId)
+                    if (!fetched.isNullOrBlank()) {
+                        resolvedUrl = fetched
+                    }
+                }
+
+                mediaPlayer = MediaPlayer().apply {
+                    setWakeMode(applicationContext, PowerManager.PARTIAL_WAKE_LOCK)
+                    setAudioAttributes(
+                        AudioAttributes.Builder()
+                            .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                            .setUsage(AudioAttributes.USAGE_MEDIA)
+                            .build()
+                    )
+
+                    if (resolvedUrl.startsWith("http://") || resolvedUrl.startsWith("https://")) {
+                        val headers = HashMap<String, String>()
+                        headers["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                        headers["Accept"] = "*/*"
+                        headers["Connection"] = "keep-alive"
+                        setDataSource(applicationContext, Uri.parse(resolvedUrl), headers)
+                    } else {
+                        var isSet = false
+                        // 1. Try FileInputStream for direct file paths (demo tracks & offline files)
+                        if (songPath.isNotEmpty()) {
+                            val file = java.io.File(songPath)
+                            if (file.exists() && file.canRead()) {
+                                try {
+                                    java.io.FileInputStream(file).use { fis ->
+                                        setDataSource(fis.fd)
+                                        isSet = true
+                                    }
+                                } catch (e: Exception) {
+                                    e.printStackTrace()
+                                }
+                            }
+                        }
+
+                        // 2. Try ContentResolver ParcelFileDescriptor for MediaStore URIs
+                        if (!isSet) {
                             try {
-                                java.io.FileInputStream(file).use { fis ->
-                                    setDataSource(fis.fd)
+                                applicationContext.contentResolver.openFileDescriptor(song.contentUri, "r")?.use { pfd ->
+                                    setDataSource(pfd.fileDescriptor)
                                     isSet = true
                                 }
                             } catch (e: Exception) {
                                 e.printStackTrace()
                             }
                         }
-                    }
 
-                    // 2. Try ContentResolver ParcelFileDescriptor for MediaStore URIs
-                    if (!isSet) {
-                        try {
-                            applicationContext.contentResolver.openFileDescriptor(song.contentUri, "r")?.use { pfd ->
-                                setDataSource(pfd.fileDescriptor)
-                                isSet = true
-                            }
-                        } catch (e: Exception) {
-                            e.printStackTrace()
-                        }
-                    }
-
-                    // 3. Fallback to Uri or String path
-                    if (!isSet) {
-                        try {
-                            setDataSource(applicationContext, song.contentUri)
-                        } catch (e: Exception) {
-                            if (songPath.isNotEmpty()) {
-                                setDataSource(songPath)
-                            } else {
-                                throw e
+                        // 3. Fallback to Uri or String path
+                        if (!isSet) {
+                            try {
+                                setDataSource(applicationContext, song.contentUri)
+                            } catch (e: Exception) {
+                                if (songPath.isNotEmpty()) {
+                                    setDataSource(songPath)
+                                } else {
+                                    throw e
+                                }
                             }
                         }
                     }
+
+                    setOnPreparedListener { mp ->
+                        _isLoading.value = false
+                        this@MusicService.onPrepared(mp)
+                    }
+                    setOnCompletionListener(this@MusicService)
+                    setOnErrorListener { mp, what, extra ->
+                        _isLoading.value = false
+                        this@MusicService.onError(mp, what, extra)
+                    }
+                    prepareAsync()
                 }
-                setOnPreparedListener(this@MusicService)
-                setOnCompletionListener(this@MusicService)
-                setOnErrorListener(this@MusicService)
-                prepareAsync()
+            } catch (e: Exception) {
+                e.printStackTrace()
+                _isLoading.value = false
+                _isPlaying.value = false
             }
-        } catch (e: Exception) {
-            e.printStackTrace()
-            _isPlaying.value = false
         }
     }
 

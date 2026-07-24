@@ -11,6 +11,8 @@ import com.example.model.Song
 import com.example.model.SortOrder
 import androidx.compose.ui.graphics.Color
 import com.example.ui.theme.VibrantPurple
+import com.example.data.extension.toSong
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -27,6 +29,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val onlineSearchResults = extensionManager.searchResults
     val isSearchingOnline = extensionManager.isSearching
 
+    private val _selectedExtensionMode = MutableStateFlow<String>("ALL")
+    val selectedExtensionMode: StateFlow<String> = _selectedExtensionMode.asStateFlow()
+
     private val _themeColor = MutableStateFlow(VibrantPurple)
     val themeColor: StateFlow<Color> = _themeColor.asStateFlow()
 
@@ -34,7 +39,31 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _themeColor.value = color
     }
 
-    val songs: StateFlow<List<Song>> = repository.songsList.stateIn(
+    fun setSelectedExtensionMode(mode: String) {
+        _selectedExtensionMode.value = mode
+        if (mode != "LOCAL") {
+            val query = searchQuery.value.ifBlank { "music" }
+            viewModelScope.launch {
+                extensionManager.searchOnlineSongs(query)
+            }
+        }
+    }
+
+    val songs: StateFlow<List<Song>> = combine(
+        repository.songsList,
+        extensionManager.searchResults,
+        _selectedExtensionMode
+    ) { localSongs, onlineSongs, mode ->
+        val onlineAsSongs = onlineSongs.map { it.toSong() }
+        when (mode) {
+            "LOCAL" -> localSongs
+            "ALL" -> (localSongs + onlineAsSongs).distinctBy { it.id }
+            else -> {
+                val filtered = onlineSongs.filter { it.extensionId == mode }.map { it.toSong() }
+                if (filtered.isNotEmpty()) filtered else (localSongs + onlineAsSongs).distinctBy { it.id }
+            }
+        }
+    }.stateIn(
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(5000),
         initialValue = emptyList()
