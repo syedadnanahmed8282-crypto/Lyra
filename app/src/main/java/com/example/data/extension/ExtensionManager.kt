@@ -713,31 +713,124 @@ class ExtensionManager(private val context: Context) {
     }
 
     private fun searchYouTubePiped(query: String): List<OnlineSong> {
-        if (query.isBlank()) return emptyList()
         val list = mutableListOf<OnlineSong>()
-        val encodedQ = try { URLEncoder.encode(query, "UTF-8") } catch (e: Exception) { query }
-        val endpoints = listOf(
-            "https://pipedapi.kavin.rocks/search?q=$encodedQ&filter=music_songs",
-            "https://api.piped.video/search?q=$encodedQ&filter=music_songs",
-            "https://inv.riverside.rocks/api/v1/search?q=$encodedQ&type=video"
+        val searchQ = if (query.isBlank()) "top music hits" else query.trim()
+        val encodedQ = try { URLEncoder.encode(searchQ, "UTF-8") } catch (e: Exception) { searchQ }
+
+        // Strategy 1: Direct YouTube Web HTML Scraper (100% reliable, no third party dependencies)
+        try {
+            val ytUrl = "https://www.youtube.com/results?search_query=$encodedQ&sp=EgIQAQ%253D%253D"
+            val req = Request.Builder()
+                .url(ytUrl)
+                .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+                .header("Accept-Language", "en-US,en;q=0.9")
+                .build()
+
+            okHttpClient.newCall(req).execute().use { resp ->
+                val html = resp.body?.string() ?: ""
+                if (html.contains("videoRenderer")) {
+                    // Match videoId and title
+                    val videoPattern = Regex(""""videoRenderer"\s*:\s*\{"videoId"\s*:\s*"([a-zA-Z0-9_-]{11})".*?"title"\s*:\s*\{"runs"\s*:\s*\[\s*\{\s*"text"\s*:\s*"([^"]+)"""")
+                    val matches = videoPattern.findAll(html)
+                    for (match in matches) {
+                        val videoId = match.groupValues[1]
+                        val rawTitle = match.groupValues[2]
+                        if (videoId.isNotBlank() && list.none { it.id == "yt_$videoId" }) {
+                            val cleanTitle = rawTitle.replace("\\u0026", "&").replace("\\\"", "\"")
+                            list.add(
+                                OnlineSong(
+                                    id = "yt_$videoId",
+                                    title = cleanTitle,
+                                    artist = "YouTube Music",
+                                    album = "YouTube Stream",
+                                    streamUrl = "yt_id:$videoId",
+                                    artworkUrl = "https://i.ytimg.com/vi/$videoId/hqdefault.jpg",
+                                    durationMs = 210000L,
+                                    extensionId = "youtube_music_preset",
+                                    extensionName = "YouTube Music Streamer"
+                                )
+                            )
+                        }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+
+        if (list.isNotEmpty()) return list
+
+        // Strategy 2: Invidious Instances
+        val invidiousInstances = listOf(
+            "https://invidious.nerqv.ps",
+            "https://yewtu.be",
+            "https://inv.tux.pizza",
+            "https://invidious.drgns.space",
+            "https://invidious.no-nerd.com"
         )
 
-        for (endpoint in endpoints) {
+        for (base in invidiousInstances) {
+            try {
+                val endpoint = "$base/api/v1/search?q=$encodedQ&type=video"
+                val req = Request.Builder()
+                    .url(endpoint)
+                    .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+                    .build()
+                okHttpClient.newCall(req).execute().use { resp ->
+                    val bodyStr = resp.body?.string() ?: ""
+                    if (bodyStr.startsWith("[")) {
+                        val jsonArr = JSONArray(bodyStr)
+                        for (i in 0 until jsonArr.length().coerceAtMost(25)) {
+                            val item = jsonArr.getJSONObject(i)
+                            val videoId = item.optString("videoId")
+                            val title = item.optString("title")
+                            val author = item.optString("author", "YouTube Artist")
+                            val duration = item.optLong("lengthSeconds", 180L)
+
+                            if (videoId.isNotBlank() && list.none { it.id == "yt_$videoId" }) {
+                                list.add(
+                                    OnlineSong(
+                                        id = "yt_$videoId",
+                                        title = title.ifBlank { "YouTube Track" },
+                                        artist = author,
+                                        album = "YouTube Music",
+                                        streamUrl = "yt_id:$videoId",
+                                        artworkUrl = "https://i.ytimg.com/vi/$videoId/hqdefault.jpg",
+                                        durationMs = duration * 1000L,
+                                        extensionId = "youtube_music_preset",
+                                        extensionName = "YouTube Music Streamer"
+                                    )
+                                )
+                            }
+                        }
+                    }
+                }
+                if (list.isNotEmpty()) break
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+
+        if (list.isNotEmpty()) return list
+
+        // Strategy 3: Piped Instances
+        val pipedEndpoints = listOf(
+            "https://pipedapi.kavin.rocks/search?q=$encodedQ&filter=music_songs",
+            "https://piped-api.garudalinux.org/search?q=$encodedQ&filter=music_songs",
+            "https://pipedapi.mha.fi/search?q=$encodedQ&filter=music_songs",
+            "https://pipedapi.drgns.space/search?q=$encodedQ&filter=music_songs"
+        )
+
+        for (endpoint in pipedEndpoints) {
             try {
                 val req = Request.Builder()
                     .url(endpoint)
-                    .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+                    .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
                     .build()
                 okHttpClient.newCall(req).execute().use { resp ->
                     val bodyStr = resp.body?.string() ?: ""
                     if (bodyStr.isNotBlank() && (bodyStr.startsWith("{") || bodyStr.startsWith("["))) {
-                        val items = if (bodyStr.startsWith("[")) {
-                            JSONArray(bodyStr)
-                        } else {
-                            val obj = JSONObject(bodyStr)
-                            obj.optJSONArray("items") ?: JSONArray()
-                        }
-
+                        val items = if (bodyStr.startsWith("[")) JSONArray(bodyStr) else JSONObject(bodyStr).optJSONArray("items") ?: JSONArray()
                         for (i in 0 until items.length().coerceAtMost(25)) {
                             val item = items.getJSONObject(i)
                             val url = item.optString("url", "")
@@ -747,10 +840,9 @@ class ExtensionManager(private val context: Context) {
                                 else -> item.optString("id")
                             }
 
-                            if (videoId.isNotBlank()) {
+                            if (videoId.isNotBlank() && list.none { it.id == "yt_$videoId" }) {
                                 val title = item.optString("title", "YouTube Music Track")
                                 val uploader = item.optString("uploaderName", item.optString("author", "YouTube Artist"))
-                                val thumbnail = item.optString("thumbnail", item.optString("thumbnailUrl", "https://picsum.photos/seed/$videoId/400/400"))
                                 val durationSec = item.optLong("duration", 180L)
 
                                 list.add(
@@ -760,7 +852,7 @@ class ExtensionManager(private val context: Context) {
                                         artist = uploader,
                                         album = "YouTube Music",
                                         streamUrl = "yt_id:$videoId",
-                                        artworkUrl = thumbnail,
+                                        artworkUrl = "https://i.ytimg.com/vi/$videoId/hqdefault.jpg",
                                         durationMs = durationSec * 1000L,
                                         extensionId = "youtube_music_preset",
                                         extensionName = "YouTube Music Streamer"
@@ -775,17 +867,21 @@ class ExtensionManager(private val context: Context) {
                 e.printStackTrace()
             }
         }
+
         return list
     }
 
     private fun fetchYouTubeAudioStreamUrl(videoId: String): String? {
-        val endpoints = listOf(
+        // Strategy 1: Piped Endpoints
+        val pipedEndpoints = listOf(
             "https://pipedapi.kavin.rocks/streams/$videoId",
-            "https://api.piped.video/streams/$videoId",
-            "https://inv.riverside.rocks/api/v1/videos/$videoId"
+            "https://piped-api.garudalinux.org/streams/$videoId",
+            "https://pipedapi.mha.fi/streams/$videoId",
+            "https://pipedapi.drgns.space/streams/$videoId",
+            "https://pipedapi.lunar.icu/streams/$videoId"
         )
 
-        for (endpoint in endpoints) {
+        for (endpoint in pipedEndpoints) {
             try {
                 val req = Request.Builder()
                     .url(endpoint)
@@ -804,16 +900,40 @@ class ExtensionManager(private val context: Context) {
                                     return url
                                 }
                             }
-                        } else {
-                            val adaptiveFormats = obj.optJSONArray("adaptiveFormats")
-                            if (adaptiveFormats != null) {
-                                for (i in 0 until adaptiveFormats.length()) {
-                                    val fmt = adaptiveFormats.getJSONObject(i)
-                                    val mime = fmt.optString("type", fmt.optString("mimeType", ""))
-                                    if (mime.contains("audio")) {
-                                        val url = fmt.optString("url")
-                                        if (url.startsWith("http")) return url
-                                    }
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+
+        // Strategy 2: Invidious Endpoints
+        val invidiousEndpoints = listOf(
+            "https://yewtu.be/api/v1/videos/$videoId",
+            "https://invidious.nerqv.ps/api/v1/videos/$videoId",
+            "https://inv.tux.pizza/api/v1/videos/$videoId",
+            "https://invidious.drgns.space/api/v1/videos/$videoId"
+        )
+
+        for (endpoint in invidiousEndpoints) {
+            try {
+                val req = Request.Builder()
+                    .url(endpoint)
+                    .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+                    .build()
+                okHttpClient.newCall(req).execute().use { resp ->
+                    val bodyStr = resp.body?.string() ?: ""
+                    if (bodyStr.isNotBlank() && bodyStr.startsWith("{")) {
+                        val obj = JSONObject(bodyStr)
+                        val adaptiveFormats = obj.optJSONArray("adaptiveFormats")
+                        if (adaptiveFormats != null) {
+                            for (i in 0 until adaptiveFormats.length()) {
+                                val fmt = adaptiveFormats.getJSONObject(i)
+                                val mime = fmt.optString("type", fmt.optString("mimeType", ""))
+                                if (mime.contains("audio")) {
+                                    val url = fmt.optString("url")
+                                    if (url.startsWith("http")) return url
                                 }
                             }
                         }
@@ -823,6 +943,35 @@ class ExtensionManager(private val context: Context) {
                 e.printStackTrace()
             }
         }
+
+        // Strategy 3: Cobalt API endpoint
+        try {
+            val cobaltJson = JSONObject().apply {
+                put("url", "https://www.youtube.com/watch?v=$videoId")
+                put("downloadMode", "audio")
+                put("audioFormat", "mp3")
+            }
+            val body = cobaltJson.toString().toRequestBody("application/json".toMediaTypeOrNull())
+            val req = Request.Builder()
+                .url("https://co.wuk.sh/api/json")
+                .header("User-Agent", "Mozilla/5.0")
+                .header("Accept", "application/json")
+                .post(body)
+                .build()
+            okHttpClient.newCall(req).execute().use { resp ->
+                val resStr = resp.body?.string() ?: ""
+                if (resStr.startsWith("{")) {
+                    val resObj = JSONObject(resStr)
+                    val streamUrl = resObj.optString("url")
+                    if (streamUrl.startsWith("http")) {
+                        return streamUrl
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+
         return null
     }
 

@@ -102,6 +102,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setSearchQuery(query: String) {
         repository.setSearchQuery(query)
+        viewModelScope.launch {
+            extensionManager.searchOnlineSongs(query)
+        }
     }
 
     fun setSortOrder(order: SortOrder) {
