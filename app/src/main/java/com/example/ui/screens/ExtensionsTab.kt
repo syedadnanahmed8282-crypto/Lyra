@@ -139,6 +139,7 @@ fun ExtensionsTab(
             val fileName = getFileNameFromUri(context, uri)
             onInstallFromLocalUri(uri, fileName) { success, error ->
                 if (success) {
+                    subTabSelected = 1
                     Toast.makeText(context, "Extension imported successfully!", Toast.LENGTH_SHORT).show()
                 } else {
                     Toast.makeText(context, "Import failed: $error", Toast.LENGTH_LONG).show()
@@ -231,9 +232,11 @@ fun ExtensionsTab(
                 showInstallDialog = false
                 filePickerLauncher.launch("*/*")
             },
-            onInstallUrl = { url ->
+            onInstallUrl = { url, callback ->
                 onInstallFromUrl(url) { success, error ->
+                    callback(success, error)
                     if (success) {
+                        subTabSelected = 1
                         Toast.makeText(context, "Plugin installed successfully!", Toast.LENGTH_SHORT).show()
                         showInstallDialog = false
                     } else {
@@ -241,9 +244,11 @@ fun ExtensionsTab(
                     }
                 }
             },
-            onInstallCode = { code, name ->
+            onInstallCode = { code, name, callback ->
                 onInstallFromCode(code, name) { success, error ->
+                    callback(success, error)
                     if (success) {
+                        subTabSelected = 1
                         Toast.makeText(context, "Custom JS Plugin installed!", Toast.LENGTH_SHORT).show()
                         showInstallDialog = false
                     } else {
@@ -620,8 +625,8 @@ private fun InstallPluginDialog(
     themeColor: Color,
     onDismiss: () -> Unit,
     onPickLocalFile: () -> Unit,
-    onInstallUrl: (String) -> Unit,
-    onInstallCode: (String, String) -> Unit
+    onInstallUrl: (String, (Boolean, String?) -> Unit) -> Unit,
+    onInstallCode: (String, String, (Boolean, String?) -> Unit) -> Unit
 ) {
     var mode by remember { mutableStateOf(0) } // 0: Local File, 1: URL, 2: Code
     var urlInput by remember { mutableStateOf("") }
@@ -753,12 +758,16 @@ private fun InstallPluginDialog(
                         if (mode == 1) {
                             if (urlInput.isNotBlank()) {
                                 isInstalling = true
-                                onInstallUrl(urlInput.trim())
+                                onInstallUrl(urlInput.trim()) { _, _ ->
+                                    isInstalling = false
+                                }
                             }
                         } else {
                             if (codeInput.isNotBlank()) {
                                 isInstalling = true
-                                onInstallCode(codeInput.trim(), pluginNameInput.trim())
+                                onInstallCode(codeInput.trim(), pluginNameInput.trim()) { _, _ ->
+                                    isInstalling = false
+                                }
                             }
                         }
                     },

@@ -13,6 +13,9 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
+import java.net.URLEncoder
+import java.net.URLDecoder
+import android.util.Base64
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -23,6 +26,10 @@ import java.util.zip.ZipInputStream
 interface JsHttpBridge {
     fun httpGet(url: String, headersJson: String?): String
     fun httpPost(url: String, body: String, headersJson: String?): String
+    fun encodeUriComponent(str: String): String
+    fun decodeUriComponent(str: String): String
+    fun base64Encode(str: String): String
+    fun base64Decode(str: String): String
 }
 
 data class ExtensionPlugin(
@@ -91,10 +98,13 @@ class ExtensionManager(private val context: Context) {
         if (files.isEmpty()) {
             val defaultPlugin1 = createDefaultNcsPlugin()
             val defaultPlugin2 = createDefaultRadioPlugin()
+            val defaultPlugin3 = createDefaultYouTubePlugin()
             savePluginToFile(defaultPlugin1)
             savePluginToFile(defaultPlugin2)
+            savePluginToFile(defaultPlugin3)
             pluginsList.add(defaultPlugin1)
             pluginsList.add(defaultPlugin2)
+            pluginsList.add(defaultPlugin3)
         } else {
             for (file in files) {
                 try {
@@ -107,6 +117,13 @@ class ExtensionManager(private val context: Context) {
                     e.printStackTrace()
                 }
             }
+        }
+
+        val hasYt = pluginsList.any { it.name.lowercase().contains("youtube") || it.id.lowercase().contains("youtube") }
+        if (!hasYt) {
+            val ytPlugin = createDefaultYouTubePlugin()
+            savePluginToFile(ytPlugin)
+            pluginsList.add(ytPlugin)
         }
 
         _installedPlugins.value = pluginsList.distinctBy { it.id }
@@ -196,13 +213,19 @@ class ExtensionManager(private val context: Context) {
             val trimmed = content.trim()
             if (trimmed.startsWith("{")) {
                 val json = JSONObject(trimmed)
+                val script = if (json.has("script") && json.getString("script").isNotBlank()) json.getString("script")
+                             else if (json.has("code") && json.getString("code").isNotBlank()) json.getString("code")
+                             else if (json.has("scriptContent") && json.getString("scriptContent").isNotBlank()) json.getString("scriptContent")
+                             else if (json.has("js") && json.getString("js").isNotBlank()) json.getString("js")
+                             else content
+
                 ExtensionPlugin(
                     id = json.optString("id", id),
                     name = json.optString("name", defaultName),
                     version = json.optString("version", "1.0.0"),
                     author = json.optString("author", "Community"),
                     description = json.optString("description", "Online audio plugin extension"),
-                    scriptContent = json.optString("script", content),
+                    scriptContent = script,
                     isEnabled = json.optBoolean("isEnabled", true),
                     iconUrl = json.optString("iconUrl", null),
                     sourceUrl = json.optString("sourceUrl", null)
@@ -213,12 +236,13 @@ class ExtensionManager(private val context: Context) {
                 var version = "1.0.0"
                 var description = "Custom JS Music Extension"
 
-                val lines = content.lines().take(20)
+                val lines = content.lines().take(30)
                 for (line in lines) {
-                    if (line.contains("@name")) name = line.substringAfter("@name").trim()
-                    if (line.contains("@author")) author = line.substringAfter("@author").trim()
-                    if (line.contains("@version")) version = line.substringAfter("@version").trim()
-                    if (line.contains("@description")) description = line.substringAfter("@description").trim()
+                    val lower = line.lowercase()
+                    if (lower.contains("@name")) name = line.substringAfter("@name").trim().removePrefix(":").trim()
+                    if (lower.contains("@author")) author = line.substringAfter("@author").trim().removePrefix(":").trim()
+                    if (lower.contains("@version")) version = line.substringAfter("@version").trim().removePrefix(":").trim()
+                    if (lower.contains("@description")) description = line.substringAfter("@description").trim().removePrefix(":").trim()
                 }
 
                 ExtensionPlugin(
@@ -233,7 +257,15 @@ class ExtensionManager(private val context: Context) {
             }
         } catch (e: Exception) {
             e.printStackTrace()
-            null
+            ExtensionPlugin(
+                id = id,
+                name = defaultName,
+                version = "1.0.0",
+                author = "Community",
+                description = "Custom Music Extension",
+                scriptContent = content,
+                isEnabled = true
+            )
         }
     }
 
@@ -242,6 +274,9 @@ class ExtensionManager(private val context: Context) {
             var cleanUrl = url.trim()
             if (!cleanUrl.startsWith("http://") && !cleanUrl.startsWith("https://")) {
                 cleanUrl = "https://$cleanUrl"
+            }
+            if (cleanUrl.contains("github.com") && cleanUrl.contains("/blob/")) {
+                cleanUrl = cleanUrl.replace("github.com", "raw.githubusercontent.com").replace("/blob/", "/")
             }
 
             val request = Request.Builder()
@@ -392,17 +427,39 @@ class ExtensionManager(private val context: Context) {
                     ""
                 }
             }
+
+            override fun encodeUriComponent(str: String): String {
+                return try { URLEncoder.encode(str, "UTF-8") } catch (e: Exception) { str }
+            }
+
+            override fun decodeUriComponent(str: String): String {
+                return try { URLDecoder.decode(str, "UTF-8") } catch (e: Exception) { str }
+            }
+
+            override fun base64Encode(str: String): String {
+                return try { Base64.encodeToString(str.toByteArray(), Base64.NO_WRAP) } catch (e: Exception) { "" }
+            }
+
+            override fun base64Decode(str: String): String {
+                return try { String(Base64.decode(str, Base64.DEFAULT)) } catch (e: Exception) { "" }
+            }
         }
     }
 
     private fun getJsPolyfill(): String {
         return """
+            var console = { log: function(){}, error: function(){}, warn: function(){} };
+            function encodeURIComponent(str) { return JsHttpBridge.encodeUriComponent(str || ''); }
+            function decodeURIComponent(str) { return JsHttpBridge.decodeUriComponent(str || ''); }
+            function atob(str) { return JsHttpBridge.base64Decode(str || ''); }
+            function btoa(str) { return JsHttpBridge.base64Encode(str || ''); }
+
             var http = {
                 get: function(url, headers) {
                     var hStr = headers ? (typeof headers === 'string' ? headers : JSON.stringify(headers)) : "{}";
                     var res = JsHttpBridge.httpGet(url, hStr);
                     return {
-                        status: 200,
+                        status: res ? 200 : 500,
                         body: res,
                         text: function() { return res; },
                         json: function() { try { return JSON.parse(res); } catch(e) { return {}; } }
@@ -413,7 +470,7 @@ class ExtensionManager(private val context: Context) {
                     var bStr = typeof body === 'string' ? body : JSON.stringify(body || {});
                     var res = JsHttpBridge.httpPost(url, bStr, hStr);
                     return {
-                        status: 200,
+                        status: res ? 200 : 500,
                         body: res,
                         text: function() { return res; },
                         json: function() { try { return JSON.parse(res); } catch(e) { return {}; } }
@@ -457,13 +514,18 @@ class ExtensionManager(private val context: Context) {
                     val jsonArray = JSONArray(jsonResultStr)
                     for (i in 0 until jsonArray.length()) {
                         val item = jsonArray.getJSONObject(i)
+                        val id = item.optString("id", "${plugin.id}_$i")
+                        var streamUrl = item.optString("streamUrl", item.optString("url", ""))
+                        if (streamUrl.isBlank() && id.isNotBlank()) {
+                            streamUrl = "yt_id:" + id.removePrefix("yt_")
+                        }
                         results.add(
                             OnlineSong(
-                                id = item.optString("id", "${plugin.id}_$i"),
+                                id = id,
                                 title = item.optString("title", "Unknown Track"),
                                 artist = item.optString("artist", "Unknown Artist"),
                                 album = item.optString("album", plugin.name),
-                                streamUrl = item.optString("streamUrl", item.optString("url", "")),
+                                streamUrl = streamUrl,
                                 artworkUrl = item.optString("artworkUrl", item.optString("cover", "")),
                                 durationMs = item.optLong("durationMs", item.optLong("duration", 180000L)),
                                 extensionId = plugin.id,
@@ -471,7 +533,9 @@ class ExtensionManager(private val context: Context) {
                             )
                         )
                     }
-                    executedSuccessfully = true
+                    if (results.isNotEmpty()) {
+                        executedSuccessfully = true
+                    }
                 }
             } finally {
                 duktape.close()
@@ -480,7 +544,7 @@ class ExtensionManager(private val context: Context) {
             e.printStackTrace()
         }
 
-        if (!executedSuccessfully && results.isEmpty()) {
+        if (!executedSuccessfully || results.isEmpty()) {
             results.addAll(executeFallbackSearch(plugin, query))
         }
 
@@ -489,34 +553,66 @@ class ExtensionManager(private val context: Context) {
 
     suspend fun resolveStreamUrl(song: OnlineSong): String = withContext(Dispatchers.IO) {
         if (song.streamUrl.startsWith("http://") || song.streamUrl.startsWith("https://")) {
-            return@withContext song.streamUrl
-        }
-        val plugin = _installedPlugins.value.find { it.id == song.extensionId }
-            ?: return@withContext song.streamUrl
-
-        try {
-            val duktape = Duktape.create()
-            try {
-                duktape.set("JsHttpBridge", JsHttpBridge::class.java, createJsBridge())
-                duktape.evaluate(getJsPolyfill())
-                duktape.evaluate(plugin.scriptContent)
-                val jsCall = "getStreamUrl('${song.id}')"
-                val resolved = duktape.evaluate(jsCall) as? String
-                if (!resolved.isNullOrEmpty() && (resolved.startsWith("http://") || resolved.startsWith("https://"))) {
-                    return@withContext resolved
-                }
-            } finally {
-                duktape.close()
+            if (!song.streamUrl.contains("youtube.com") && !song.streamUrl.contains("youtu.be")) {
+                return@withContext song.streamUrl
             }
-        } catch (e: Exception) {
-            e.printStackTrace()
         }
+
+        val videoId = when {
+            song.streamUrl.startsWith("yt_id:") -> song.streamUrl.removePrefix("yt_id:")
+            song.id.startsWith("yt_") -> song.id.removePrefix("yt_")
+            song.streamUrl.contains("v=") -> song.streamUrl.substringAfter("v=").substringBefore("&")
+            else -> null
+        }
+
+        if (videoId != null) {
+            val audioUrl = fetchYouTubeAudioStreamUrl(videoId)
+            if (!audioUrl.isNullOrEmpty()) {
+                return@withContext audioUrl
+            }
+        }
+
+        val plugin = _installedPlugins.value.find { it.id == song.extensionId }
+        if (plugin != null) {
+            try {
+                val duktape = Duktape.create()
+                try {
+                    duktape.set("JsHttpBridge", JsHttpBridge::class.java, createJsBridge())
+                    duktape.evaluate(getJsPolyfill())
+                    duktape.evaluate(plugin.scriptContent)
+                    val jsCall = "getStreamUrl('${song.id}')"
+                    val resolved = duktape.evaluate(jsCall) as? String
+                    if (!resolved.isNullOrEmpty() && (resolved.startsWith("http://") || resolved.startsWith("https://"))) {
+                        return@withContext resolved
+                    }
+                } finally {
+                    duktape.close()
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+
         return@withContext song.streamUrl
     }
 
     private fun executeFallbackSearch(plugin: ExtensionPlugin, query: String): List<OnlineSong> {
         val list = mutableListOf<OnlineSong>()
         val qLower = query.lowercase().trim()
+
+        val isYouTubePlugin = plugin.name.lowercase().contains("youtube") ||
+                plugin.id.lowercase().contains("youtube") ||
+                plugin.id.lowercase().contains("yt") ||
+                plugin.description.lowercase().contains("youtube") ||
+                plugin.scriptContent.lowercase().contains("youtube") ||
+                plugin.scriptContent.lowercase().contains("piped")
+
+        if (isYouTubePlugin || list.isEmpty()) {
+            val ytResults = searchYouTubePiped(if (qLower.isEmpty()) "popular music" else query)
+            if (ytResults.isNotEmpty()) {
+                return ytResults.map { it.copy(extensionId = plugin.id, extensionName = plugin.name) }
+            }
+        }
 
         if (plugin.id == "sound_stream_preset" || plugin.id.contains("ncs")) {
             val sampleTracks = listOf(
@@ -614,6 +710,194 @@ class ExtensionManager(private val context: Context) {
         }
 
         return list
+    }
+
+    private fun searchYouTubePiped(query: String): List<OnlineSong> {
+        if (query.isBlank()) return emptyList()
+        val list = mutableListOf<OnlineSong>()
+        val encodedQ = try { URLEncoder.encode(query, "UTF-8") } catch (e: Exception) { query }
+        val endpoints = listOf(
+            "https://pipedapi.kavin.rocks/search?q=$encodedQ&filter=music_songs",
+            "https://api.piped.video/search?q=$encodedQ&filter=music_songs",
+            "https://inv.riverside.rocks/api/v1/search?q=$encodedQ&type=video"
+        )
+
+        for (endpoint in endpoints) {
+            try {
+                val req = Request.Builder()
+                    .url(endpoint)
+                    .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+                    .build()
+                okHttpClient.newCall(req).execute().use { resp ->
+                    val bodyStr = resp.body?.string() ?: ""
+                    if (bodyStr.isNotBlank() && (bodyStr.startsWith("{") || bodyStr.startsWith("["))) {
+                        val items = if (bodyStr.startsWith("[")) {
+                            JSONArray(bodyStr)
+                        } else {
+                            val obj = JSONObject(bodyStr)
+                            obj.optJSONArray("items") ?: JSONArray()
+                        }
+
+                        for (i in 0 until items.length().coerceAtMost(25)) {
+                            val item = items.getJSONObject(i)
+                            val url = item.optString("url", "")
+                            val videoId = when {
+                                url.contains("watch?v=") -> url.substringAfter("watch?v=").substringBefore("&")
+                                item.has("videoId") -> item.optString("videoId")
+                                else -> item.optString("id")
+                            }
+
+                            if (videoId.isNotBlank()) {
+                                val title = item.optString("title", "YouTube Music Track")
+                                val uploader = item.optString("uploaderName", item.optString("author", "YouTube Artist"))
+                                val thumbnail = item.optString("thumbnail", item.optString("thumbnailUrl", "https://picsum.photos/seed/$videoId/400/400"))
+                                val durationSec = item.optLong("duration", 180L)
+
+                                list.add(
+                                    OnlineSong(
+                                        id = "yt_$videoId",
+                                        title = title,
+                                        artist = uploader,
+                                        album = "YouTube Music",
+                                        streamUrl = "yt_id:$videoId",
+                                        artworkUrl = thumbnail,
+                                        durationMs = durationSec * 1000L,
+                                        extensionId = "youtube_music_preset",
+                                        extensionName = "YouTube Music Streamer"
+                                    )
+                                )
+                            }
+                        }
+                    }
+                }
+                if (list.isNotEmpty()) break
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+        return list
+    }
+
+    private fun fetchYouTubeAudioStreamUrl(videoId: String): String? {
+        val endpoints = listOf(
+            "https://pipedapi.kavin.rocks/streams/$videoId",
+            "https://api.piped.video/streams/$videoId",
+            "https://inv.riverside.rocks/api/v1/videos/$videoId"
+        )
+
+        for (endpoint in endpoints) {
+            try {
+                val req = Request.Builder()
+                    .url(endpoint)
+                    .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+                    .build()
+                okHttpClient.newCall(req).execute().use { resp ->
+                    val bodyStr = resp.body?.string() ?: ""
+                    if (bodyStr.isNotBlank() && bodyStr.startsWith("{")) {
+                        val obj = JSONObject(bodyStr)
+                        val audioStreams = obj.optJSONArray("audioStreams")
+                        if (audioStreams != null && audioStreams.length() > 0) {
+                            for (i in 0 until audioStreams.length()) {
+                                val streamObj = audioStreams.getJSONObject(i)
+                                val url = streamObj.optString("url")
+                                if (url.startsWith("http://") || url.startsWith("https://")) {
+                                    return url
+                                }
+                            }
+                        } else {
+                            val adaptiveFormats = obj.optJSONArray("adaptiveFormats")
+                            if (adaptiveFormats != null) {
+                                for (i in 0 until adaptiveFormats.length()) {
+                                    val fmt = adaptiveFormats.getJSONObject(i)
+                                    val mime = fmt.optString("type", fmt.optString("mimeType", ""))
+                                    if (mime.contains("audio")) {
+                                        val url = fmt.optString("url")
+                                        if (url.startsWith("http")) return url
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+        return null
+    }
+
+    private fun createDefaultYouTubePlugin(): ExtensionPlugin {
+        val jsScript = """
+            // @name YouTube Music Streamer
+            // @author Lyra Extension Hub
+            // @version 1.5.0
+            // @description Online YouTube Music streamer extension with global song search
+            
+            function search(query) {
+                if (!query) return JSON.stringify([]);
+                var url = "https://pipedapi.kavin.rocks/search?q=" + encodeURIComponent(query) + "&filter=music_songs";
+                var res = httpGet(url, {});
+                if (!res) {
+                    url = "https://api.piped.video/search?q=" + encodeURIComponent(query) + "&filter=music_songs";
+                    res = httpGet(url, {});
+                }
+                if (!res) return JSON.stringify([]);
+                try {
+                    var data = JSON.parse(res);
+                    var items = data.items || data;
+                    var results = [];
+                    for (var i = 0; i < items.length && i < 25; i++) {
+                        var item = items[i];
+                        var vId = item.url ? item.url.replace('/watch?v=', '') : item.id;
+                        if (vId) {
+                            results.push({
+                                "id": "yt_" + vId,
+                                "title": item.title || "YouTube Track",
+                                "artist": item.uploaderName || item.uploader || "YouTube Artist",
+                                "album": "YouTube Music",
+                                "streamUrl": "yt_id:" + vId,
+                                "artworkUrl": item.thumbnail || "https://picsum.photos/seed/" + vId + "/400/400",
+                                "durationMs": (item.duration || 180) * 1000
+                            });
+                        }
+                    }
+                    return JSON.stringify(results);
+                } catch(e) {
+                    return JSON.stringify([]);
+                }
+            }
+            
+            function getStreamUrl(id) {
+                var vId = id.replace('yt_', '');
+                var url = "https://pipedapi.kavin.rocks/streams/" + vId;
+                var res = httpGet(url, {});
+                if (!res) {
+                    url = "https://api.piped.video/streams/" + vId;
+                    res = httpGet(url, {});
+                }
+                if (res) {
+                    try {
+                        var data = JSON.parse(res);
+                        var streams = data.audioStreams || [];
+                        if (streams.length > 0) {
+                            return streams[0].url;
+                        }
+                    } catch(e) {}
+                }
+                return "";
+            }
+        """.trimIndent()
+
+        return ExtensionPlugin(
+            id = "youtube_music_preset",
+            name = "YouTube Music Streamer",
+            version = "1.5.0",
+            author = "Lyra Extension Hub",
+            description = "Stream and search any music track directly from YouTube",
+            scriptContent = jsScript,
+            isEnabled = true,
+            iconUrl = "https://picsum.photos/seed/ytmusic/200/200"
+        )
     }
 
     private fun createDefaultNcsPlugin(): ExtensionPlugin {
